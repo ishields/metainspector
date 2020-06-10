@@ -39,7 +39,7 @@ module MetaInspector
       # Returns an array of [img_url, width, height] sorted by image area (width * height)
       def with_size
         @with_size ||= begin
-           img_nodes = parsed.search('//img') #.select{ |img_node| img_node['src'] }
+           img_nodes = parsed.search('//img')
 
            imgs_with_size = img_nodes.map do |img_node|
              if img_node['srcset']
