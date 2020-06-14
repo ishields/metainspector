@@ -12,8 +12,13 @@ module MetaInspector
 
       def initialize(main_parser, options = {})
         @download_images = options[:download_images]
-        @fetch_all_image_meta = options[:fetch_all_image_meta]
-        @image_blacklist_words =  options[:image_blacklist_words] || DEFAULT_IMG_BLACKLIST
+
+        download_image_options = options[:download_image_options] || { fetch_all_image_meta: false, image_blacklist_words: DEFAULT_IMG_BLACKLIST }
+        @fetch_all_image_meta = download_image_options[:fetch_all_image_meta]
+        @image_blacklist_words =  download_image_options[:image_blacklist_words]
+        @max_image_downloads =  download_image_options[:max_image_downloads] # Default's to nil and if nil will not remove any photos
+        @reject_invalid_images = download_image_options[:reject_invalid_images]
+
         super(main_parser)
       end
 
@@ -33,6 +38,17 @@ module MetaInspector
       # If none found, tries with Twitter image
       def owner_suggested
         suggested_img = content_of(meta['og:image']) || content_of(meta['twitter:image'])
+
+        # Verify suggest_img can be found
+        if @download_images && @reject_invalid_images
+          begin
+            # Test the image and if it raises an exception don't use it
+            FastImage.new(suggested_img, raise_on_failure: true)
+          rescue
+            return nil
+          end
+        end
+
         URL.absolutify(suggested_img, base_url, normalize: false) if suggested_img
       end
 
@@ -60,9 +76,20 @@ module MetaInspector
            # Remove any urls that have been blacklisted
            imgs_with_size.reject! { |url| @image_blacklist_words.any? { |blacklist_word| url.first.include?(blacklist_word) } }
 
+           # After rejecting blacklisted and duplicated images, only take the first @max_image_downloads if this option is specified.
+           # This can help avoid really long run times in the event there are a huge number of images on the page.
+           imgs_with_size = imgs_with_size.first(@max_image_downloads) if @max_image_downloads
+
            if @download_images
              imgs_with_size.map! do |img_with_size|
                image_with_meta(img_with_size)
+             end
+
+             if @reject_invalid_images && @fetch_all_image_meta
+               imgs_with_size.select! do |img_with_size|
+                 _url, _width, _height, _file_type, _file_size, valid  = img_with_size
+                 valid
+               end
              end
            else
              imgs_with_size.map! do |url, width, height|
@@ -101,20 +128,26 @@ module MetaInspector
 
       def image_with_meta(img_with_size)
         url, width, height  = img_with_size
-        file_type = nil
-        file_size = nil
 
         if @fetch_all_image_meta
+          file_type = nil
+          file_size = nil
+          valid = true
           # Fetch everything, dimensions, size, type
-          fast_img = FastImage.new(url)
-          width, height = fast_img.size
-          file_type = fast_img.type
-          file_size = fast_img.content_length
+          begin
+            fast_img = FastImage.new(url)
+            width, height = fast_img.size
+            file_type = fast_img.type
+            file_size = fast_img.content_length
+          rescue
+            valid = false
+          end
+          [url, width.to_i, height.to_i, file_type, file_size, valid]
         else
-          # Only fetch size if you haven't detected it yet
+          # Only fetch size if you haven't detected it
           width, height = FastImage.size(url) if width.nil? || height.nil?
+          [url, width.to_i, height.to_i]
         end
-        [url, width.to_i, height.to_i, file_type, file_size]
       end
 
       # Analyze the srcset and attempt to choose the largest image from it.
@@ -139,6 +172,12 @@ module MetaInspector
         imgs += parsed_document.xpath("//@data-bg|//@data-background").map do |data_bg|
           [URL.absolutify(data_bg.value&.strip, base_url, normalize: false), 0, 0] if data_bg.try(:value).present?
         end
+
+        # As a fallback look for anything that looks like an image url.  This will help detect images that are stored in json on the page and then redered with js later.
+        imgs += parsed_document.to_html.scan(/http?s?:?\/\/[^"']*\.(?:png|jpg|jpeg|png)/i).map do |url|
+          [url.strip, 0, 0] if url.present?
+        end
+
         imgs
       end
 
